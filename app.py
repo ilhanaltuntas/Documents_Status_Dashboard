@@ -871,7 +871,7 @@ if not detail_mode:
     with project_col:
         chosen = st.multiselect(
             "PROJECT", projects, default=projects,
-            placeholder="Project"
+            placeholder="Project", key="dash_project"
         )
 
 
@@ -886,7 +886,7 @@ if not detail_mode:
     with partner_col:
         selected_partners = st.multiselect(
             "PARTNER", partner_options, default=partner_options,
-            placeholder="Partner"
+            placeholder="Partner", key="dash_partner"
         )
 
 
@@ -904,7 +904,7 @@ if not detail_mode:
         selected_subcontractors = st.multiselect(
             "SUBCONTRACTOR", subcontractor_options,
             default=subcontractor_options,
-            placeholder="Subcontractor"
+            placeholder="Subcontractor", key="dash_subcontractor"
         )
 
 
@@ -918,7 +918,7 @@ if not detail_mode:
         sort_choice = st.selectbox(
             "PROGRESS",
             ["Progress büyükten küçüğe", "Progress küçükten büyüğe", "Discipline A-Z"],
-            index=0
+            index=0, key="dash_progress_sort"
         )
 
 
@@ -937,7 +937,7 @@ if not detail_mode:
                 "MODERN ENGINEERING DOCUMENT STATUS DETAIL",
                 "RET ENGINEERING DOCUMENT STATUS DETAIL",
             ],
-            index=0
+            index=0, key="dash_title"
         )
 
 
@@ -955,7 +955,7 @@ if not detail_mode:
         drawing_search = st.text_input(
             "DRAWING NUMBER",
             value="",
-            placeholder="-MTH-"
+            placeholder="-MTH-", key="dash_drawing"
         )
 
 
@@ -969,7 +969,7 @@ if not detail_mode:
         description_search = st.text_input(
             "DESCRIPTION",
             value="",
-            placeholder="Açıklama ara..."
+            placeholder="Açıklama ara...", key="dash_description"
         )
 
 
@@ -983,7 +983,7 @@ if not detail_mode:
         discipline_search = st.text_input(
             "DISCIPLINE",
             value="",
-            placeholder="Discipline ara..."
+            placeholder="Discipline ara...", key="dash_discipline"
         )
 
 
@@ -995,6 +995,10 @@ if not detail_mode:
         )
         if st.button("🔄 REFRESH", type="primary", use_container_width=True):
             st.cache_data.clear()
+            st.rerun()
+        if st.button("✖ CLEAR FILTERS", use_container_width=True, key="dashboard_clear_filters"):
+            for key in ["dash_project", "dash_partner", "dash_subcontractor", "dash_progress_sort", "dash_title", "dash_drawing", "dash_description", "dash_discipline"]:
+                st.session_state.pop(key, None)
             st.rerun()
 
 
@@ -1260,7 +1264,7 @@ if detail_name:
     </style>
     <div class="toolbar"><span id="result-info" class="page-info"></span><button id="prev" class="page-btn" type="button">−</button><button id="next" class="page-btn" type="button">+</button></div>
     <div class="detail-table-scroll"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
-    <div id="popup"><div id="popup-title" class="popup-title"></div><input id="search" type="text" placeholder="Search values..."><div class="tools"><button id="select-visible" type="button">SELECT VISIBLE</button><button id="clear" type="button">CLEAR</button></div><div id="sort-tools" class="sort-tools"><button id="sort-asc" type="button">A → Z</button><button id="sort-desc" type="button">Z → A</button><button id="sort-clear" type="button">CLEAR SORT</button></div><div id="options"></div><div class="actions"><button id="cancel" type="button">CANCEL</button><button id="apply" type="button">APPLY</button></div></div>
+    <div id="popup"><div id="popup-title" class="popup-title"></div><input id="search" type="text" placeholder="Search values..."><div class="tools"><button id="select-visible" type="button">SELECT VISIBLE</button><button id="clear" type="button">CLEAR</button></div><div id="sort-tools" class="sort-tools"><button id="sort-newest" type="button">NEWEST → OLDEST</button><button id="sort-oldest" type="button">OLDEST → NEWEST</button><button id="sort-clear" type="button">CLEAR SORT</button></div><div id="options"></div><div class="actions"><button id="cancel" type="button">CANCEL</button><button id="apply" type="button">APPLY</button></div></div>
     <script id="columns-data" type="application/json">__COLUMNS__</script><script id="rows-data" type="application/json">__ROWS__</script><script id="reset-data" type="application/json">__RESET__</script>
     <script>
     (function(){
@@ -1273,12 +1277,12 @@ if detail_name:
       function uniqueValues(col){return [...new Set(allRows.map(r=>String(r[col]??'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));}
       const valueCache={};function valuesFor(col){return valueCache[col]||(valueCache[col]=uniqueValues(col));}
       function parseDate(value){const text=String(value??'').trim();let match=text.match(/^(\d{2})[-/.](\d{2})[-/.](\d{4})$/);if(match)return Date.UTC(Number(match[3]),Number(match[2])-1,Number(match[1]));match=text.match(/^(\d{2})-([A-Z]{3})-(\d{4})$/i);if(match){const months={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};return Date.UTC(Number(match[3]),months[match[2].toUpperCase()],Number(match[1]));}match=text.match(/^(\d{4})-(\d{2})-(\d{2})/);if(match)return Date.UTC(Number(match[1]),Number(match[2])-1,Number(match[3]));return NaN;}
-      function applySort(rows){if(!sortState)return rows;const copy=[...rows],col=sortState.col,dir=sortState.dir,isDate=columns[col]==='TRANSMITTAL DATE';copy.sort((a,b)=>{let result=0;if(isDate){const av=parseDate(a[col]),bv=parseDate(b[col]);if(Number.isNaN(av)&&Number.isNaN(bv))result=String(a[col]??'').localeCompare(String(b[col]??''),undefined,{numeric:true,sensitivity:'base'});else if(Number.isNaN(av))result=1;else if(Number.isNaN(bv))result=-1;else result=av-bv;}else{result=String(a[col]??'').trim().localeCompare(String(b[col]??'').trim(),undefined,{numeric:true,sensitivity:'base'});}return dir==='asc'?result:-result;});return copy;}
+      function applySort(rows){if(!sortState)return rows;const copy=[...rows],col=sortState.col,dir=sortState.dir;copy.sort((a,b)=>{const av=parseDate(a[col]),bv=parseDate(b[col]);if(Number.isNaN(av)&&Number.isNaN(bv))return 0;if(Number.isNaN(av))return 1;if(Number.isNaN(bv))return -1;return dir==='asc'?av-bv:bv-av;});return copy;}
       function runFilter(){filteredRows=allRows.filter(row=>Object.entries(filters).every(([col,set])=>!set.size||set.has(String(row[Number(col)]??'').trim())));filteredRows=applySort(filteredRows);page=1;render();arrows.forEach(b=>b.classList.toggle('active',filters[b.dataset.col]?.size>0||sortState?.col===Number(b.dataset.col)));}
       function render(){const pages=Math.max(1,Math.ceil(filteredRows.length/pageSize));page=Math.min(page,pages);const start=(page-1)*pageSize,shown=filteredRows.slice(start,start+pageSize);tbody.innerHTML=shown.map(row=>'<tr>'+row.map(v=>`<td>${esc(v)}</td>`).join('')+'</tr>').join('');info.textContent=`${filteredRows.length.toLocaleString()} records | PAGE ${page} / ${pages}`;prev.disabled=page<=1;next.disabled=page>=pages;document.querySelector('.detail-table-scroll').scrollTop=0;}
       function renderOptions(){const q=search.value.trim().toLocaleLowerCase(),list=valuesFor(currentCol).filter(v=>v.toLocaleLowerCase().includes(q));options.innerHTML=list.length?'':'<div class="empty">No values found</div>';list.forEach(v=>{const label=document.createElement('label');label.className='option';const box=document.createElement('input');box.type='checkbox';box.value=v;box.checked=draft.has(v);box.onchange=()=>box.checked?draft.add(v):draft.delete(v);const span=document.createElement('span');span.textContent=v;label.append(box,span);options.appendChild(label);});}
-      function openPopup(button){currentCol=button.dataset.col;draft=new Set(filters[currentCol]||[]);search.value='';document.getElementById('popup-title').textContent=columns[currentCol];const isDate=columns[currentCol]==='TRANSMITTAL DATE';document.getElementById('sort-tools').style.display='flex';document.getElementById('sort-asc').textContent=isDate?'OLDEST → NEWEST':'A → Z';document.getElementById('sort-desc').textContent=isDate?'NEWEST → OLDEST':'Z → A';renderOptions();popup.classList.add('open');const r=button.getBoundingClientRect(),w=270;popup.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';popup.style.top=Math.min(r.bottom+4,window.innerHeight-365)+'px';search.focus();}
-      arrows.forEach(b=>b.onclick=e=>{e.stopPropagation();openPopup(b)});search.oninput=renderOptions;document.getElementById('select-visible').onclick=()=>{options.querySelectorAll('input').forEach(b=>{b.checked=true;draft.add(b.value)})};document.getElementById('clear').onclick=()=>{draft.clear();renderOptions()};document.getElementById('cancel').onclick=()=>popup.classList.remove('open');document.getElementById('apply').onclick=()=>{filters[currentCol]=new Set(draft);popup.classList.remove('open');runFilter()};document.getElementById('sort-asc').onclick=()=>{sortState={col:Number(currentCol),dir:'asc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-desc').onclick=()=>{sortState={col:Number(currentCol),dir:'desc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-clear').onclick=()=>{sortState=null;popup.classList.remove('open');runFilter()};popup.onclick=e=>e.stopPropagation();document.onclick=()=>popup.classList.remove('open');prev.onclick=()=>{if(page>1){page--;render()}};next.onclick=()=>{if(page<Math.ceil(filteredRows.length/pageSize)){page++;render()}};render();
+      function openPopup(button){currentCol=button.dataset.col;draft=new Set(filters[currentCol]||[]);search.value='';document.getElementById('popup-title').textContent=columns[currentCol];document.getElementById('sort-tools').style.display=columns[currentCol]==='TRANSMITTAL DATE'?'flex':'none';renderOptions();popup.classList.add('open');const r=button.getBoundingClientRect(),w=270;popup.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';popup.style.top=Math.min(r.bottom+4,window.innerHeight-365)+'px';search.focus();}
+      arrows.forEach(b=>b.onclick=e=>{e.stopPropagation();openPopup(b)});search.oninput=renderOptions;document.getElementById('select-visible').onclick=()=>{options.querySelectorAll('input').forEach(b=>{b.checked=true;draft.add(b.value)})};document.getElementById('clear').onclick=()=>{draft.clear();renderOptions()};document.getElementById('cancel').onclick=()=>popup.classList.remove('open');document.getElementById('apply').onclick=()=>{filters[currentCol]=new Set(draft);popup.classList.remove('open');runFilter()};document.getElementById('sort-newest').onclick=()=>{sortState={col:Number(currentCol),dir:'desc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-oldest').onclick=()=>{sortState={col:Number(currentCol),dir:'asc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-clear').onclick=()=>{sortState=null;popup.classList.remove('open');runFilter()};popup.onclick=e=>e.stopPropagation();document.onclick=()=>popup.classList.remove('open');prev.onclick=()=>{if(page>1){page--;render()}};next.onclick=()=>{if(page<Math.ceil(filteredRows.length/pageSize)){page++;render()}};render();
     })();
     </script>
     '''.replace('__COLUMNS__', columns_json).replace('__ROWS__', rows_json).replace('__RESET__', json.dumps(reset_token))
