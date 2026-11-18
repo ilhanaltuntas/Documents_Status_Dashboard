@@ -148,7 +148,7 @@ div[data-testid="stHorizontalBlock"]:has(.panel-title) > div[data-testid="column
 .kpi-link {display:block;text-decoration:none !important;color:inherit !important;}
 .kpi-link .kpi {cursor:pointer;transition:transform .14s ease,box-shadow .14s ease;}
 .kpi-link:hover .kpi {transform:translateY(-2px);box-shadow:0 5px 14px rgba(16,43,80,.16);}
-.detail-title {font-size:1.18rem;font-weight:900;color:#102B50;margin:.10rem 0 .35rem;text-align:center;letter-spacing:.35px;background:#E8F1FA;border:1px solid #C7D9EA;border-radius:8px;padding:7px 10px;}
+.detail-title {font-size:1.02rem;font-weight:900;color:#102B50;margin:0 0 .08rem;text-align:center;letter-spacing:.25px;background:#E8F1FA;border:1px solid #C7D9EA;border-radius:7px;padding:4px 8px;}
 .ref-table a.cell-link {color:inherit !important;text-decoration:none !important;display:block;width:100%;height:100%;cursor:pointer;}
 .ref-table a.cell-link:hover {text-decoration:underline !important;font-weight:900;}
 .hero {
@@ -199,7 +199,14 @@ div[data-testid="stHorizontalBlock"]:has(.panel-title) > div[data-testid="column
 .epc2-panel .ref-table th {background:#E3F3F4;border-color:#C4E3E6;}
 .epc2-panel .ref-table tbody tr.total-row td {background:#CDEBED !important;border-top-color:#087F91;}
 .dynamic-progress-panel {background:#fff;border-color:#CBD9E7;overflow:hidden;}
-.status-chart-panel {margin-top:0;overflow:hidden;}
+.status-chart-panel {
+    margin-top:0;
+    overflow:hidden;
+    background:#EEF3F8;
+    border:1px solid #B9CDE0 !important;
+    border-radius:7px !important;
+    padding:2px 3px 0 !important;
+}
 .prepared-by-note {min-height:15px;margin:11px 0 0 5px;color:#C62828;font:italic 700 9px Arial,sans-serif;letter-spacing:.025em;}
 .ref-table-wrap {width:100%;overflow:hidden;background:#fff;border:1px solid #CBD9E7;border-radius:5px;}
 .ref-table {width:100%;border-collapse:collapse;table-layout:fixed;font-family:Arial,sans-serif;color:#183451;}
@@ -658,11 +665,62 @@ def parse_progress(value):
 
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=3)
 def read_data(file_mtime):
     # Header is on Excel row 10 (zero-based header=9).
     raw = pd.read_excel(SOURCE, sheet_name="DETAIL_REPORT", header=9, dtype=str)
     raw.columns = [str(c).strip().upper() for c in raw.columns]
+
+    # Preserve TRANSMITTAL DATE exactly as displayed/formatted in Excel.
+    # pandas can turn Excel dates into values such as 2024-11-18 00:00:00;
+    # openpyxl lets us respect the cell's own Excel number format instead.
+    if "TRANSMITTAL DATE" in raw.columns:
+        try:
+            from openpyxl import load_workbook
+            from datetime import datetime, date
+            workbook = load_workbook(SOURCE, read_only=True, data_only=True)
+            worksheet = workbook["DETAIL_REPORT"]
+            header_values = [
+                str(cell.value).strip().upper() if cell.value is not None else ""
+                for cell in worksheet[10]
+            ]
+            date_col_index = header_values.index("TRANSMITTAL DATE") + 1
+
+            def excel_display_date(cell):
+                value = cell.value
+                if value is None:
+                    return pd.NA
+                if not isinstance(value, (datetime, date)):
+                    return str(value).strip()
+
+                number_format = str(cell.number_format or "").lower()
+                # Follow the workbook's visible date pattern.
+                if "mmm" in number_format:
+                    return value.strftime("%d-%b-%Y").upper()
+                if "yyyy" in number_format and ("mm" in number_format or "m" in number_format):
+                    separator = "." if "." in number_format else ("/" if "/" in number_format else "-")
+                    return value.strftime(f"%d{separator}%m{separator}%Y")
+                return value.strftime("%d-%m-%Y")
+
+            # Read the date column once, sequentially. Calling worksheet.cell()
+            # thousands of times in read-only mode repeatedly scans the worksheet
+            # and can make the Streamlit page appear frozen.
+            displayed_dates = [
+                excel_display_date(row[0])
+                for row in worksheet.iter_rows(
+                    min_row=11,
+                    max_row=10 + len(raw),
+                    min_col=date_col_index,
+                    max_col=date_col_index
+                )
+            ]
+            if len(displayed_dates) < len(raw):
+                displayed_dates.extend([pd.NA] * (len(raw) - len(displayed_dates)))
+            raw["TRANSMITTAL DATE"] = displayed_dates[:len(raw)]
+            workbook.close()
+        except Exception:
+            # Keep the original Excel value if workbook formatting cannot be read.
+            pass
     needed = ["PROJE", "DISCIPLINE", "DRAWING NUMBER", "DESCRIPTION", "STATUS", "PARTNER", "SUBCONTRACTOR", "ÖZEL"]
     detail_extra_cols = ["REV.", "REV", "PUBLICATION CODE", "TRANSMITTAL NUMBER", "TRANSMITTAL DATE"]
     missing = [x for x in needed if x not in raw.columns]
@@ -694,6 +752,33 @@ def read_data(file_mtime):
 
 
 
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def build_detail_excel(detail_frame):
+    """Build and cache the XLSX using installed openpyxl."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        detail_frame.to_excel(writer, index=False, sheet_name="Document Details")
+        worksheet = writer.sheets["Document Details"]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+        # Style only the header and estimate widths from a small sample.
+        # Scanning every Excel cell was the main performance bottleneck.
+        from openpyxl.styles import PatternFill, Font
+        header_fill = PatternFill("solid", fgColor="DCEAF7")
+        header_font = Font(bold=True, color="173B67")
+        sample = detail_frame.head(200)
+        for col_idx, column_name in enumerate(detail_frame.columns, start=1):
+            header_cell = worksheet.cell(row=1, column=col_idx)
+            header_cell.fill = header_fill
+            header_cell.font = header_font
+            sample_lengths = sample[column_name].astype(str).str.len()
+            sample_max = int(sample_lengths.max()) if len(sample_lengths) and pd.notna(sample_lengths.max()) else 0
+            width = min(max(len(str(column_name)), sample_max) + 2, 45)
+            worksheet.column_dimensions[header_cell.column_letter].width = max(width, 12)
+    return output.getvalue()
 
 def make_table(data, project=None):
     part = data if project is None else data[data["PROJE"].str.upper() == project]
@@ -1000,15 +1085,36 @@ if detail_name:
         [data-testid="stAppViewContainer"] {background:#F4F7FB !important;}
         [data-testid="stHeader"] {background:#F4F7FB !important;}
         [data-testid="stDataFrame"] {background:#FFFFFF !important; border:1px solid #D6E2EE; border-radius:8px; overflow:hidden;}
-        .stApp [data-testid="stVerticalBlock"] {gap:.35rem;}
-        .stApp [data-testid="stHorizontalBlock"] {gap:.55rem;}
+        .stApp [data-testid="stVerticalBlock"] {gap:.12rem !important;}
+        .stApp [data-testid="stHorizontalBlock"] {gap:.35rem !important;}
+        .stApp .block-container {padding-top:.08rem !important;padding-bottom:.20rem !important;}
+        .stApp [data-testid="stTextInput"] input,
+        .stApp [data-testid="stMultiSelect"] [data-baseweb="select"],
+        .stApp [data-testid="stSelectbox"] [data-baseweb="select"] {
+            min-height:1.48rem !important;height:1.48rem !important;font-size:.66rem !important;
+        }
+        .stApp [data-testid="stWidgetLabel"] p {font-size:.60rem !important;line-height:1 !important;}
+        .stApp [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+            max-width:78px !important;font-size:.58rem !important;height:1.05rem !important;
+        }
+        .stApp [data-testid="stSlider"] {padding-top:0 !important;padding-bottom:0 !important;}
         .stApp [data-testid="stCaptionContainer"] {margin-top:-4px;margin-bottom:-3px;}
         .stApp [data-testid="stDownloadButton"] {margin-top:0;margin-bottom:0;}
-        .detail-nav-note {color:#5D7188;font-size:11px;margin-top:-6px;margin-bottom:2px;}
+        .stApp [data-testid="stDownloadButton"] button {
+            min-height:1.55rem !important;height:1.55rem !important;
+            background:linear-gradient(90deg,#087F91,#13A6B5) !important;
+            color:#FFFFFF !important;border:0 !important;border-radius:5px !important;
+            font-size:.66rem !important;font-weight:900 !important;
+            box-shadow:0 2px 5px rgba(8,127,145,.22) !important;
+        }
+        .stApp [data-testid="stDownloadButton"] button:hover {
+            background:linear-gradient(90deg,#075A9E,#1767B2) !important;
+        }
+        .detail-nav-note {display:none;}
         </style>""",
         unsafe_allow_html=True
     )
-    nav_home, nav_refresh, nav_space = st.columns([1.15, 1.0, 6.85], gap="small")
+    nav_home, nav_refresh, nav_clear, nav_space = st.columns([1.15, 1.0, 1.10, 5.75], gap="small")
     with nav_home:
         if st.button("🏠 HOME", type="primary", use_container_width=True, key="detail_home"):
             st.query_params.clear()
@@ -1017,7 +1123,12 @@ if detail_name:
         if st.button("🔄 REFRESH", use_container_width=True, key="detail_refresh"):
             st.cache_data.clear()
             st.rerun()
-    st.markdown('<div class="detail-nav-note">HOME: return to dashboard.</div>', unsafe_allow_html=True)
+    with nav_clear:
+        # The actual table filters live in the HTML component below.
+        # This button publishes a reset signal through the query parameter.
+        if st.button("✖ CLEAR FILTERS", use_container_width=True, key="detail_clear_filters"):
+            st.query_params["reset_filters"] = str(pd.Timestamp.utcnow().value)
+            st.rerun()
     detail_df = filtered.copy()
     if detail_project:
         detail_df = detail_df[detail_df["PROJE"].astype(str).str.upper() == str(detail_project).upper()].copy()
@@ -1031,7 +1142,6 @@ if detail_name:
     title_bits = [str(detail_project) if detail_project else None, str(detail_discipline) if detail_discipline else None, detail_name]
     detail_title = " / ".join(x for x in title_bits if x)
     st.markdown(f'<div class="detail-title">{html.escape(detail_title)} - DOCUMENT DETAILS</div>', unsafe_allow_html=True)
-    st.caption(f"{detail_df['DRAWING NUMBER'].nunique():,} unique document(s) shown. Dashboard filters are preserved for the current data selection.")
     preferred_cols = [
         "PROJE", "DRAWING NUMBER", "REV.", "DESCRIPTION", "DISCIPLINE", "STATUS",
         "PUBLICATION CODE", "TRANSMITTAL NUMBER", "TRANSMITTAL DATE",
@@ -1071,60 +1181,19 @@ if detail_name:
             detail_df = detail_df[term_mask].copy()
 
     # Compact adjacent filters. Removed DESCRIPTION / TRANSMITTAL NUMBER / TRANSMITTAL DATE widgets.
-    st.markdown("<div style=\"font-size:18px;font-weight:850;color:#102B50;margin:2px 0 1px;\">TABLE FILTERS</div>", unsafe_allow_html=True)
-    filter_names = [c for c in [
-        "PROJE", "DRAWING NUMBER", "REV.", "DISCIPLINE", "STATUS",
-        "PUBLICATION CODE", "PROGRESS", "PARTNER", "SUBCONTRACTOR"
-    ] if c in detail_df.columns]
-    filter_widths = {
-        "PROJE": 1.0, "DRAWING NUMBER": 1.35, "REV.": 0.85, "DISCIPLINE": 1.15,
-        "STATUS": 1.05, "PUBLICATION CODE": 1.15, "PROGRESS": 1.25,
-        "PARTNER": 1.0, "SUBCONTRACTOR": 1.1
-    }
-    filter_row = st.columns([filter_widths[c] for c in filter_names], gap="small")
+    # Upper Streamlit filter controls removed. Column-header ▼ filters are used instead.
     detail_filtered = detail_df.copy()
-    for filter_col, column_name in zip(filter_row, filter_names):
-        with filter_col:
-            if column_name in ["PROJE", "DISCIPLINE", "STATUS", "PARTNER", "SUBCONTRACTOR"]:
-                options = sorted(
-                    detail_df[column_name].dropna().astype(str).loc[lambda x: x.str.strip().ne("")].unique().tolist()
-                )
-                selected_values = st.multiselect(
-                    column_name, options, default=[], key=f"detail_filter_{column_name}"
-                )
-                if selected_values:
-                    detail_filtered = detail_filtered[detail_filtered[column_name].astype(str).isin(selected_values)]
-            elif column_name == "PROGRESS":
-                progress_values = pd.to_numeric(detail_df[column_name], errors="coerce").dropna()
-                if not progress_values.empty:
-                    min_p = float(progress_values.min())
-                    max_p = float(progress_values.max())
-                    chosen_p = st.slider(
-                        column_name, min_value=0, max_value=100,
-                        value=(int(round(min_p * 100)), int(round(max_p * 100))),
-                        key="detail_filter_PROGRESS"
-                    )
-                    detail_filtered = detail_filtered[
-                        detail_filtered[column_name].isna() |
-                        detail_filtered[column_name].between(chosen_p[0] / 100, chosen_p[1] / 100, inclusive="both")
-                    ]
-            else:
-                search_value = st.text_input(
-                    column_name, key=f"detail_filter_{column_name}", placeholder="Search..."
-                ).strip()
-                if search_value:
-                    detail_filtered = detail_filtered[
-                        detail_filtered[column_name].astype(str).str.contains(
-                            re.escape(search_value), case=False, regex=True, na=False
-                        )
-                    ]
-
-    st.caption(
-        f"Showing {len(detail_filtered):,} row(s) / "
-        f"{detail_filtered['DRAWING NUMBER'].nunique():,} unique document(s)."
+    st.markdown(
+        f'<div style="font:700 10px Arial;color:#5D7188;margin:0;line-height:1;">'
+        f'{len(detail_filtered):,} rows / {detail_filtered["DRAWING NUMBER"].nunique():,} documents</div>',
+        unsafe_allow_html=True
     )
     detail_view = detail_filtered[detail_cols].drop_duplicates().copy()
     # Display common missing-value markers as blank cells in the detail table and Excel export.
+    # Convert the display-only detail table to object before inserting blank strings.
+    # Pandas nullable Float64 columns reject fillna("") and raise:
+    # TypeError: Invalid value '' for dtype 'Float64'.
+    detail_view = detail_view.astype(object)
     detail_view = detail_view.replace({
         "(Boş)": "",
         "<NA>": "",
@@ -1132,140 +1201,90 @@ if detail_name:
         "nan": "",
         "NaN": "",
         "None": ""
-    }).fillna("")
-    if "TRANSMITTAL DATE" in detail_view.columns:
-        _td = pd.to_datetime(detail_view["TRANSMITTAL DATE"], errors="coerce", dayfirst=True)
-        detail_view["TRANSMITTAL DATE"] = [
-            d.strftime("%d-%b-%Y").upper() if pd.notna(d) else (str(v) if pd.notna(v) else "")
-            for d, v in zip(_td, detail_view["TRANSMITTAL DATE"])
-        ]
+    })
+    detail_view = detail_view.where(pd.notna(detail_view), "")
+    # TRANSMITTAL DATE already carries Excel's displayed value and format.
     if "PROGRESS" in detail_view.columns:
-        detail_view["PROGRESS"] = detail_view["PROGRESS"].apply(lambda v: f"{v:.0%}" if pd.notna(v) else "")
-    # Prepare an Excel download in which every visible field is a separate column.
-    excel_buffer = BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        detail_view.to_excel(writer, index=False, sheet_name="Document Details")
-        worksheet = writer.sheets["Document Details"]
-        worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = worksheet.dimensions
-        for column_cells in worksheet.columns:
-            column_letter = column_cells[0].column_letter
-            max_length = max(
-                len(str(cell.value)) if cell.value is not None else 0
-                for cell in column_cells
-            )
-            worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 45)
-        for cell in worksheet[1]:
-            cell.fill = __import__("openpyxl").styles.PatternFill("solid", fgColor="DCEAF7")
-            cell.font = __import__("openpyxl").styles.Font(bold=True, color="173B67")
+        def format_progress_value(value):
+            if value is None or pd.isna(value) or str(value).strip() == "":
+                return ""
+            # Accept numeric values (0.55), numeric text ("0.55"),
+            # and already formatted percentages ("55%").
+            text_value = str(value).strip().replace(",", ".")
+            if text_value.endswith("%"):
+                try:
+                    return f"{float(text_value[:-1]):.0f}%"
+                except (TypeError, ValueError):
+                    return text_value
+            try:
+                numeric_value = float(text_value)
+                # Workbook progress is normally stored as 0-1. If a value is
+                # already in 0-100 form, do not multiply it again.
+                return f"{numeric_value:.0%}" if abs(numeric_value) <= 1 else f"{numeric_value:.0f}%"
+            except (TypeError, ValueError):
+                return text_value
+
+        detail_view["PROGRESS"] = detail_view["PROGRESS"].apply(format_progress_value)
+    # Cached Excel generation avoids rebuilding the workbook on every widget rerun.
+    excel_bytes = build_detail_excel(detail_view)
 
     download_name = re.sub(r"[^A-Za-z0-9_-]+", "_", detail_title).strip("_") or "document_details"
-    st.download_button(
-        "⬇️ DOWNLOAD EXCEL",
-        data=excel_buffer.getvalue(),
-        file_name=f"{download_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="detail_excel_download"
-    )
+    download_col, download_space = st.columns([0.15, 0.85], gap="small")
+    with download_col:
+        st.download_button(
+            "⬇ EXCEL", data=excel_bytes, file_name=f"{download_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, key="detail_excel_download"
+        )
 
-    # Light HTML table for the link/detail page.
-    light_table_html = detail_view.to_html(
-        index=False,
-        escape=True,
-        classes="detail-light-table",
-        border=0
-    )
-    st.markdown(
-        """<style>
-        .detail-table-scroll {
-            max-height:720px; overflow:auto; background:#FFFFFF;
-            border:1px solid #C9D8E6; border-radius:8px;
-            box-shadow:0 2px 8px rgba(31,72,110,.08);
-        }
-        table.detail-light-table {
-            width:100%; border-collapse:separate; border-spacing:0;
-            background:#FFFFFF; color:#183451; font-family:Arial,sans-serif;
-            font-size:12px;
-        }
-        table.detail-light-table thead th {
-            position:sticky; top:0; z-index:2; padding:10px 9px;
-            text-align:left; background:#DCEAF7; color:#173B67;
-            border-right:1px solid #C6D6E5; border-bottom:2px solid #9FB8CF;
-            white-space:nowrap; font-weight:800;
-        }
-        table.detail-light-table tbody td {
-            padding:8px 9px; border-right:1px solid #E2EAF2;
-            border-bottom:1px solid #E2EAF2; white-space:nowrap;
-            background:#FFFFFF;
-        }
-        table.detail-light-table tbody tr:nth-child(even) td {background:#F4F8FC;}
-        table.detail-light-table tbody tr:hover td {background:#EAF3FB;}
+    # Send the complete filtered dataset to one browser component. The component
+    # filters all rows first and then paginates the filtered result in groups of 250.
+    import json
+    table_columns = [str(column) for column in detail_view.columns]
+    table_rows = detail_view.astype(str).values.tolist()
+    columns_json = json.dumps(table_columns, ensure_ascii=False).replace("</", "<\\/")
+    rows_json = json.dumps(table_rows, ensure_ascii=False).replace("</", "<\\/")
+    reset_token = str(st.query_params.get("reset_filters", ""))
 
-        /* TRANSMITTAL NUMBER: keep the identifier on one line. */
-        table.detail-light-table th:nth-child(9),
-        table.detail-light-table td:nth-child(9) {
-            white-space:nowrap !important;
-            overflow-wrap:normal !important;
-            word-break:keep-all !important;
-            min-width:190px;
-        }
+    interactive_table = r'''
+    <style>
+    *{box-sizing:border-box}body{margin:0;background:#fff;font-family:Arial,sans-serif;color:#183451}
+    .toolbar{height:32px;display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:1px 3px}
+    .page-info{font-size:10px;font-weight:900;color:#075A9E}.page-btn{width:24px;height:24px;border:0;border-radius:4px;background:#1767B2;color:#fff;font-weight:900;cursor:pointer}.page-btn:disabled{opacity:.35;cursor:default}
+    .detail-table-scroll{height:680px;overflow:auto;border:1px solid #C9D8E6;border-radius:7px;background:#fff}
+    table{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}thead th{position:sticky;top:0;z-index:5;padding:0;background:linear-gradient(90deg,#075A9E,#13A6B5);color:#fff;border-right:1px solid #C6D6E5;border-bottom:2px solid #9FB8CF;min-width:76px}
+    .header-wrap{min-height:42px;display:flex;align-items:center;justify-content:center;padding:5px 3px;gap:4px}.header-label{font-size:10px;font-weight:900;white-space:normal;line-height:1.1;text-align:center}.filter-arrow{width:18px;height:22px;padding:0;border:0;border-radius:3px;background:rgba(255,255,255,.14);color:#fff;font-size:9px;font-weight:900;cursor:pointer}.filter-arrow:hover,.filter-arrow.active{background:#F4B942;color:#12385E}
+    td{padding:7px;border-right:1px solid #E2EAF2;border-bottom:1px solid #E2EAF2;white-space:normal;line-height:1.2}tbody tr:nth-child(6n+1) td{background:#EAF4FF}tbody tr:nth-child(6n+2) td{background:#EAFBF8}tbody tr:nth-child(6n+3) td{background:#FFF5E6}tbody tr:nth-child(6n+4) td{background:#FDECEF}tbody tr:nth-child(6n+5) td{background:#F1EDFF}tbody tr:nth-child(6n) td{background:#F4F8FC}tbody tr:hover td{background:#D7EBFF!important}
+    th:nth-child(2),td:nth-child(2){min-width:205px;white-space:nowrap}th:nth-child(3),td:nth-child(3){min-width:52px;text-align:center;white-space:nowrap}th:nth-child(8),td:nth-child(8){min-width:190px;white-space:nowrap}th:nth-child(9),td:nth-child(9){min-width:96px;text-align:center;white-space:nowrap}
+    #popup{display:none;position:fixed;z-index:9999;width:270px;max-height:370px;padding:8px;border:1px solid #75A9CC;border-radius:7px;background:#fff;box-shadow:0 8px 25px rgba(12,50,85,.28)}#popup.open{display:block}.popup-title{font-size:10px;font-weight:900;color:#075A9E;margin-bottom:5px}#search{width:100%;height:28px;padding:4px 7px;border:1px solid #A9C5DB;border-radius:4px;font-size:10px}.tools,.actions,.sort-tools{display:flex;gap:5px;margin:6px 0}.sort-tools{display:none;flex-wrap:wrap}.sort-tools button{height:24px;padding:0 7px;border:0;border-radius:4px;background:#1767B2;color:#fff;font-size:8px;font-weight:900;cursor:pointer}#sort-clear{background:#718096!important}.tools button,.actions button{height:24px;padding:0 8px;border:0;border-radius:4px;color:#fff;font-size:9px;font-weight:900;cursor:pointer}#select-visible,#apply{background:#087F91}#clear,#cancel{background:#718096}#options{max-height:230px;overflow:auto;border:1px solid #D6E2EC;border-radius:4px;background:#FAFCFE}.option{display:flex;align-items:center;gap:6px;padding:5px 6px;border-bottom:1px solid #E7EEF5;font-size:10px;cursor:pointer}.option:hover{background:#EAF4FF}.option input{accent-color:#087F91}.actions{justify-content:flex-end}.empty{padding:10px;text-align:center;color:#718096;font-size:10px}
+    </style>
+    <div class="toolbar"><span id="result-info" class="page-info"></span><button id="prev" class="page-btn" type="button">−</button><button id="next" class="page-btn" type="button">+</button></div>
+    <div class="detail-table-scroll"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+    <div id="popup"><div id="popup-title" class="popup-title"></div><input id="search" type="text" placeholder="Search values..."><div class="tools"><button id="select-visible" type="button">SELECT VISIBLE</button><button id="clear" type="button">CLEAR</button></div><div id="sort-tools" class="sort-tools"><button id="sort-newest" type="button">NEWEST → OLDEST</button><button id="sort-oldest" type="button">OLDEST → NEWEST</button><button id="sort-clear" type="button">CLEAR SORT</button></div><div id="options"></div><div class="actions"><button id="cancel" type="button">CANCEL</button><button id="apply" type="button">APPLY</button></div></div>
+    <script id="columns-data" type="application/json">__COLUMNS__</script><script id="rows-data" type="application/json">__ROWS__</script><script id="reset-data" type="application/json">__RESET__</script>
+    <script>
+    (function(){
+      const columns=JSON.parse(document.getElementById('columns-data').textContent),allRows=JSON.parse(document.getElementById('rows-data').textContent),pageSize=250;
+      const thead=document.getElementById('thead'),tbody=document.getElementById('tbody'),popup=document.getElementById('popup'),search=document.getElementById('search'),options=document.getElementById('options'),info=document.getElementById('result-info'),prev=document.getElementById('prev'),next=document.getElementById('next');
+      const resetToken=JSON.parse(document.getElementById('reset-data').textContent||'""');const filters={};let page=1,currentCol=null,draft=new Set(),filteredRows=allRows,sortState=null;
+      function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+      thead.innerHTML='<tr>'+columns.map((c,i)=>`<th><div class="header-wrap"><span class="header-label">${esc(c)}</span><button class="filter-arrow" data-col="${i}" type="button">▼</button></div></th>`).join('')+'</tr>';
+      const arrows=Array.from(document.querySelectorAll('.filter-arrow'));
+      function uniqueValues(col){return [...new Set(allRows.map(r=>String(r[col]??'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));}
+      const valueCache={};function valuesFor(col){return valueCache[col]||(valueCache[col]=uniqueValues(col));}
+      function parseDate(value){const text=String(value??'').trim();let match=text.match(/^(\d{2})[-/.](\d{2})[-/.](\d{4})$/);if(match)return Date.UTC(Number(match[3]),Number(match[2])-1,Number(match[1]));match=text.match(/^(\d{2})-([A-Z]{3})-(\d{4})$/i);if(match){const months={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};return Date.UTC(Number(match[3]),months[match[2].toUpperCase()],Number(match[1]));}match=text.match(/^(\d{4})-(\d{2})-(\d{2})/);if(match)return Date.UTC(Number(match[1]),Number(match[2])-1,Number(match[3]));return NaN;}
+      function applySort(rows){if(!sortState)return rows;const copy=[...rows],col=sortState.col,dir=sortState.dir;copy.sort((a,b)=>{const av=parseDate(a[col]),bv=parseDate(b[col]);if(Number.isNaN(av)&&Number.isNaN(bv))return 0;if(Number.isNaN(av))return 1;if(Number.isNaN(bv))return -1;return dir==='asc'?av-bv:bv-av;});return copy;}
+      function runFilter(){filteredRows=allRows.filter(row=>Object.entries(filters).every(([col,set])=>!set.size||set.has(String(row[Number(col)]??'').trim())));filteredRows=applySort(filteredRows);page=1;render();arrows.forEach(b=>b.classList.toggle('active',filters[b.dataset.col]?.size>0||sortState?.col===Number(b.dataset.col)));}
+      function render(){const pages=Math.max(1,Math.ceil(filteredRows.length/pageSize));page=Math.min(page,pages);const start=(page-1)*pageSize,shown=filteredRows.slice(start,start+pageSize);tbody.innerHTML=shown.map(row=>'<tr>'+row.map(v=>`<td>${esc(v)}</td>`).join('')+'</tr>').join('');info.textContent=`${filteredRows.length.toLocaleString()} records | PAGE ${page} / ${pages}`;prev.disabled=page<=1;next.disabled=page>=pages;document.querySelector('.detail-table-scroll').scrollTop=0;}
+      function renderOptions(){const q=search.value.trim().toLocaleLowerCase(),list=valuesFor(currentCol).filter(v=>v.toLocaleLowerCase().includes(q));options.innerHTML=list.length?'':'<div class="empty">No values found</div>';list.forEach(v=>{const label=document.createElement('label');label.className='option';const box=document.createElement('input');box.type='checkbox';box.value=v;box.checked=draft.has(v);box.onchange=()=>box.checked?draft.add(v):draft.delete(v);const span=document.createElement('span');span.textContent=v;label.append(box,span);options.appendChild(label);});}
+      function openPopup(button){currentCol=button.dataset.col;draft=new Set(filters[currentCol]||[]);search.value='';document.getElementById('popup-title').textContent=columns[currentCol];document.getElementById('sort-tools').style.display=columns[currentCol]==='TRANSMITTAL DATE'?'flex':'none';renderOptions();popup.classList.add('open');const r=button.getBoundingClientRect(),w=270;popup.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';popup.style.top=Math.min(r.bottom+4,window.innerHeight-365)+'px';search.focus();}
+      arrows.forEach(b=>b.onclick=e=>{e.stopPropagation();openPopup(b)});search.oninput=renderOptions;document.getElementById('select-visible').onclick=()=>{options.querySelectorAll('input').forEach(b=>{b.checked=true;draft.add(b.value)})};document.getElementById('clear').onclick=()=>{draft.clear();renderOptions()};document.getElementById('cancel').onclick=()=>popup.classList.remove('open');document.getElementById('apply').onclick=()=>{filters[currentCol]=new Set(draft);popup.classList.remove('open');runFilter()};document.getElementById('sort-newest').onclick=()=>{sortState={col:Number(currentCol),dir:'desc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-oldest').onclick=()=>{sortState={col:Number(currentCol),dir:'asc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-clear').onclick=()=>{sortState=null;popup.classList.remove('open');runFilter()};popup.onclick=e=>e.stopPropagation();document.onclick=()=>popup.classList.remove('open');prev.onclick=()=>{if(page>1){page--;render()}};next.onclick=()=>{if(page<Math.ceil(filteredRows.length/pageSize)){page++;render()}};render();
+    })();
+    </script>
+    '''.replace('__COLUMNS__', columns_json).replace('__ROWS__', rows_json).replace('__RESET__', json.dumps(reset_token))
+    components.html(interactive_table, height=725, scrolling=False)
 
-        /* Compact, clean header and body. No forced wide columns. */
-        table.detail-light-table th,
-        table.detail-light-table td {
-            white-space:normal !important;
-            overflow-wrap:normal;
-            word-break:normal;
-            line-height:1.25;
-            vertical-align:middle;
-        }
-        table.detail-light-table thead th {
-            text-align:center !important;
-            vertical-align:middle !important;
-            font-size:11px;
-            line-height:1.15;
-            padding:8px 6px;
-        }
 
-        /* DRAWING NUMBER: slightly wider, without changing other columns. */
-        table.detail-light-table th:nth-child(2),
-        table.detail-light-table td:nth-child(2) {
-            min-width:205px;
-            white-space:nowrap !important;
-        }
-
-        /* REV. is column 3 and stays compact. */
-        table.detail-light-table th:nth-child(3),
-        table.detail-light-table td:nth-child(3) {
-            white-space:nowrap !important;
-            text-align:center;
-            min-width:52px;
-        }
-
-        /* TRANSMITTAL NUMBER is column 8: keep each identifier on one line, without forcing extra table width. */
-        table.detail-light-table th:nth-child(8),
-        table.detail-light-table td:nth-child(8) {
-            white-space:nowrap !important;
-            overflow-wrap:normal !important;
-            word-break:keep-all !important;
-            hyphens:none !important;
-        }
-
-        /* TRANSMITTAL DATE is column 9 and can remain compact. */
-        table.detail-light-table th:nth-child(9),
-        table.detail-light-table td:nth-child(9) {
-            white-space:nowrap !important;
-            text-align:center;
-            min-width:96px;
-        }
-        </style>""",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        f'<div class="detail-table-scroll">{light_table_html}</div>',
-        unsafe_allow_html=True
-    )
     st.stop()
 
 
@@ -1311,9 +1330,11 @@ for col, name, value in zip(cols, card_names, counts):
     bg = "#06499d" if is_total else ("#FDE8EA" if is_not_ifc else "#f4faff")
     fg = "#ffffff" if is_total else color
     label_color = "#ffffff" if is_total else ("#B82032" if is_not_ifc else "#16345f")
+    # Use Streamlit's current app URL and a JavaScript navigation target.
+    # This is more reliable on Streamlit Cloud / proxied deployments than a bare relative href.
     detail_url = f"?detail={quote(name)}"
     col.markdown(
-        f'<a class="kpi-link" href="{detail_url}">'
+        f'<a class="kpi-link" href="{detail_url}" target="_self">'
         f'<div class="kpi" style="background:{bg};border-top-color:{color}">'
         f'<div class="label" style="color:{label_color}">{name}</div>'
         f'<div class="value" style="color:{fg}">{fmt(value)}</div></div></a>',
@@ -1351,7 +1372,7 @@ shared_panel_height = max(220, min(540, 42 + max_rows * 11))
 # Sol taraftaki DOCUMENT STATUS panelinin alt çizgisini EPC tablolarındaki
 # TOTAL satırının alt çizgisiyle hizala. İmza bu hizanın altında kalır.
 progress_chart_height = max(225, int(shared_panel_height * 0.46))
-status_chart_height = max(180, shared_panel_height - progress_chart_height + 42)
+status_chart_height = max(300, shared_panel_height - progress_chart_height + 80)
 
 # KPI kartları ile alt paneller arasına çok küçük boşluk
 st.markdown(
@@ -1483,6 +1504,14 @@ with left:
     # are displayed inside the bars for a compact, professional appearance.
     # Compact horizontal DOCUMENT STATUS chart. Keeps the page height small,
     # preserves readable status names, and always shows document counts.
+    status_ticktext = [
+        "Awaiting Employer<br>Response",
+        "Code 1",
+        "Code 2",
+        "Code 3",
+        "Code 4",
+        "Pending<br>Publication",
+    ]
     status_fig = go.Figure(go.Bar(
         x=status_chart_values,
         y=STATUS,
@@ -1490,29 +1519,30 @@ with left:
         customdata=STATUS,
         marker=dict(
             color=[COLORS[status_name] for status_name in STATUS],
-            line=dict(color="#FFFFFF", width=1.2)
+            line=dict(color="rgba(255,255,255,0.95)", width=1)
         ),
         text=[fmt(value) for value in status_chart_values],
         textposition="outside",
-        textfont=dict(size=11, color="#173B67", family="Arial Black"),
+        textfont=dict(size=14, color="#062B68", family="Arial Black"),
         cliponaxis=False,
         hovertemplate="<b>%{customdata}</b><br>Documents: %{x:,}<extra></extra>"
     ))
     xmax = max(status_chart_values, default=0)
     status_fig.update_layout(
-        height=max(250, status_chart_height),
-        margin=dict(l=132, r=34, t=10, b=8),
-        paper_bgcolor="rgba(255,255,255,0)",
-        plot_bgcolor="rgba(255,255,255,0)",
+        height=max(315, status_chart_height),
+        margin=dict(l=92, r=46, t=2, b=2),
+        paper_bgcolor="#EEF3F8",
+        plot_bgcolor="#EEF3F8",
         showlegend=False,
         font=dict(color="#183451", size=10, family="Arial"),
         xaxis=dict(
             title=None,
             showticklabels=False,
             showgrid=True,
-            gridcolor="#E2EAF2",
+            gridcolor="#DDE6EF",
+            gridwidth=1,
             zeroline=False,
-            range=[0, xmax * 1.06 if xmax > 0 else 1],
+            range=[0, xmax * 1.08 if xmax > 0 else 1],
             fixedrange=True
         ),
         yaxis=dict(
@@ -1520,15 +1550,16 @@ with left:
             autorange="reversed",
             tickmode="array",
             tickvals=STATUS,
-            ticktext=STATUS,
+            ticktext=status_ticktext,
             showticklabels=True,
             automargin=False,
-            tickfont=dict(size=8, color="#102B50", family="Arial Black"),
+            tickfont=dict(size=10, color="#173B67", family="Arial"),
+            ticks="",
             showgrid=False,
             zeroline=False,
             fixedrange=True
         ),
-        bargap=0.10,
+        bargap=0.30,
         hoverlabel=dict(
             bgcolor="#153F70",
             bordercolor="#9AB6D0",
@@ -1551,13 +1582,13 @@ with left:
     """
     status_chart_html = status_fig.to_html(
         full_html=False,
-        include_plotlyjs=True,
+        include_plotlyjs="cdn",
         config={"displayModeBar": False, "responsive": True},
         post_script=chart_click_script
     )
     components.html(
         status_chart_html,
-        height=max(258, status_chart_height + 8),
+        height=max(323, status_chart_height + 8),
         scrolling=False
     )
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1639,22 +1670,22 @@ for col, project in [(middle,"EPC-1"),(right,"EPC-2")]:
                 discipline_q = quote(discipline_name)
                 project_q = quote(project)
                 discipline_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}"
-                html_parts.append(f'<td><a class="cell-link" href="{discipline_url}">{html.escape(discipline_name)}</a></td>')
+                html_parts.append(f'<td><a class="cell-link" href="{discipline_url}" target="_self">{html.escape(discipline_name)}</a></td>')
                 for status_name in STATUS:
                     value = int(row[status_name])
                     cell_class = ' class="code2-col"' if status_name == "Code 2" else (' class="code3-col"' if status_name == "Code 3" else "")
                     if value:
                         cell_url = f"?detail={quote(status_name)}&project={project_q}&discipline={discipline_q}"
-                        cell_value = f'<a class="cell-link" href="{cell_url}">{fmt(value)}</a>'
+                        cell_value = f'<a class="cell-link" href="{cell_url}" target="_self">{fmt(value)}</a>'
                     else:
                         cell_value = ""
                     html_parts.append(f'<td{cell_class}>{cell_value}</td>')
                 not_ifc_value = int(row["NOT IFC"])
                 not_ifc_url = f"?detail={quote('NOT IFC')}&project={project_q}&discipline={discipline_q}"
-                not_ifc_html = f'<a class="cell-link" href="{not_ifc_url}">{fmt(not_ifc_value)}</a>' if not_ifc_value else ""
+                not_ifc_html = f'<a class="cell-link" href="{not_ifc_url}" target="_self">{fmt(not_ifc_value)}</a>' if not_ifc_value else ""
                 html_parts.append(f'<td class="not-ifc-col">{not_ifc_html}</td>')
                 total_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}"
-                html_parts.append(f'<td><b><a class="cell-link" href="{total_url}">{fmt(int(row["TOTAL"]))}</a></b></td>')
+                html_parts.append(f'<td><b><a class="cell-link" href="{total_url}" target="_self">{fmt(int(row["TOTAL"]))}</a></b></td>')
                 progress_value = row["PROGRESS"]
                 if pd.isna(progress_value):
                     html_parts.append('<td class="progress-col"></td>')
@@ -1697,11 +1728,11 @@ for col, project in [(middle,"EPC-1"),(right,"EPC-2")]:
             for status_name in STATUS:
                 cell_class = ' class="code2-col"' if status_name == "Code 2" else (' class="code3-col"' if status_name == "Code 3" else "")
                 total_status_url = f"?detail={quote(status_name)}&project={quote(project)}"
-                html_parts.append(f'<td{cell_class}><a class="cell-link" href="{total_status_url}">{fmt(total_values[status_name])}</a></td>')
+                html_parts.append(f'<td{cell_class}><a class="cell-link" href="{total_status_url}" target="_self">{fmt(total_values[status_name])}</a></td>')
             total_not_ifc_url = f"?detail={quote('NOT IFC')}&project={quote(project)}"
-            html_parts.append(f'<td class="not-ifc-col"><a class="cell-link" href="{total_not_ifc_url}">{fmt(total_values["NOT IFC"])}</a></td>')
+            html_parts.append(f'<td class="not-ifc-col"><a class="cell-link" href="{total_not_ifc_url}" target="_self">{fmt(total_values["NOT IFC"])}</a></td>')
             total_docs_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={quote(project)}"
-            html_parts.append(f'<td><a class="cell-link" href="{total_docs_url}">{fmt(total_values["TOTAL"])}</a></td>')
+            html_parts.append(f'<td><a class="cell-link" href="{total_docs_url}" target="_self">{fmt(total_values["TOTAL"])}</a></td>')
             total_progress = total_values["PROGRESS"]
             if pd.isna(total_progress):
                 html_parts.append('<td class="progress-col"></td>')
@@ -1722,6 +1753,18 @@ for col, project in [(middle,"EPC-1"),(right,"EPC-2")]:
             html_parts.append('</tr></tbody></table></div>')
             st.markdown("".join(html_parts), unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown(r"""
+<script>
+document.addEventListener('click', function(event) {
+    const link = event.target.closest('a.cell-link');
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.location.assign(link.getAttribute('href'));
+}, true);
+</script>
+""", unsafe_allow_html=True)
 
 
 
