@@ -7,7 +7,7 @@ import html
 import re
 import base64
 from io import BytesIO
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 
 
@@ -145,6 +145,7 @@ div[data-testid="stHorizontalBlock"]:has(.panel-title) > div[data-testid="column
     border:0;background:#1767B2;color:#fff;padding:0 .5rem;
 }
 [data-testid="stButton"] button:hover {background:#0E4F91;color:#fff;}
+.kpi-definition{min-height:15px;margin-top:2px;font-family:Georgia,"Times New Roman",serif;font-size:10px;font-style:italic;font-weight:700;line-height:1.1;text-align:center;white-space:nowrap;letter-spacing:.1px}
 .kpi-link {display:block;text-decoration:none !important;color:inherit !important;}
 .kpi-link .kpi {cursor:pointer;transition:transform .14s ease,box-shadow .14s ease;}
 .kpi-link:hover .kpi {transform:translateY(-2px);box-shadow:0 5px 14px rgba(16,43,80,.16);}
@@ -851,6 +852,34 @@ except Exception as e:
 # Row 1: primary filters, document sorting and dashboard title.
 # Define link/detail mode before it is used.
 detail_mode = bool(st.query_params.get("detail"))
+
+# When returning HOME from a drill-down page, restore the dashboard filters
+# that were active when the clicked count was opened.
+if not detail_mode:
+    def _home_qp_values(name):
+        try:
+            return st.query_params.get_all(name)
+        except Exception:
+            value = st.query_params.get(name)
+            return [str(value)] if value not in (None, "") else []
+
+    _restore_map = {
+        "f_project": "dash_project",
+        "f_partner": "dash_partner",
+        "f_subcontractor": "dash_subcontractor",
+        "f_drawing": "dash_drawing",
+        "f_description": "dash_description",
+        "f_discipline": "dash_discipline",
+    }
+    for _qp, _state in _restore_map.items():
+        _vals = _home_qp_values(_qp)
+        if _vals:
+            st.session_state[_state] = _vals if _qp in {"f_project", "f_partner", "f_subcontractor"} else _vals[-1]
+    # Remove only the temporary URL filter parameters after session state is restored.
+    for _qp in _restore_map:
+        if _qp in st.query_params:
+            del st.query_params[_qp]
+
 projects = sorted(data["PROJE"].dropna().unique().tolist())
 if not detail_mode:
     st.markdown(
@@ -917,7 +946,7 @@ if not detail_mode:
     with sort_col:
         sort_choice = st.selectbox(
             "PROGRESS",
-            ["Progress büyükten küçüğe", "Progress küçükten büyüğe", "Discipline A-Z"],
+            ["Progress High to Low", "Progress Low to High", "Discipline A-Z"],
             index=0, key="dash_progress_sort"
         )
 
@@ -969,7 +998,7 @@ if not detail_mode:
         description_search = st.text_input(
             "DESCRIPTION",
             value="",
-            placeholder="Açıklama ara...", key="dash_description"
+            placeholder="Search description...", key="dash_description"
         )
 
 
@@ -983,7 +1012,7 @@ if not detail_mode:
         discipline_search = st.text_input(
             "DISCIPLINE",
             value="",
-            placeholder="Discipline ara...", key="dash_discipline"
+            placeholder="Search discipline...", key="dash_discipline"
         )
 
 
@@ -1007,15 +1036,23 @@ if not detail_mode:
 
 
 else:
-    # Preserve the full data scope on link pages; filtering is provided in the detail table below.
-    chosen = projects
-    selected_partners = sorted(data["PARTNER"].dropna().unique().tolist())
-    selected_subcontractors = sorted(data["SUBCONTRACTOR"].dropna().unique().tolist())
+    # Restore the dashboard filters carried by drill-down links so clicked totals
+    # always match the currently visible dashboard totals.
+    def qp_list(name, fallback):
+        try:
+            vals = st.query_params.get_all(name)
+        except Exception:
+            vals = []
+        return vals if vals else fallback
+
+    chosen = qp_list("f_project", projects)
+    selected_partners = qp_list("f_partner", sorted(data["PARTNER"].dropna().unique().tolist()))
+    selected_subcontractors = qp_list("f_subcontractor", sorted(data["SUBCONTRACTOR"].dropna().unique().tolist()))
     sort_mode = "Highest Progress"
     title_search = ""
-    drawing_search = ""
-    description_search = ""
-    discipline_search = ""
+    drawing_search = str(st.query_params.get("f_drawing", ""))
+    description_search = str(st.query_params.get("f_description", ""))
+    discipline_search = str(st.query_params.get("f_discipline", ""))
 
 
 filtered = data[
@@ -1071,6 +1108,28 @@ if discipline_search:
 
 
 filtered = filtered[~filtered["DISCIPLINE"].astype("string").str.contains("---", regex=False, na=False)].copy()
+
+# Persist the active dashboard scope into drill-down links.
+# Without this, clicking a filtered count opens the detail page against the full dataset.
+def current_filter_query():
+    params = []
+    for value in chosen:
+        params.append(("f_project", str(value)))
+    for value in selected_partners:
+        params.append(("f_partner", str(value)))
+    for value in selected_subcontractors:
+        params.append(("f_subcontractor", str(value)))
+    if drawing_search:
+        params.append(("f_drawing", drawing_search))
+    if description_search:
+        params.append(("f_description", description_search))
+    if discipline_search:
+        params.append(("f_discipline", discipline_search))
+    return urlencode(params, doseq=True)
+
+active_filter_query = current_filter_query()
+active_filter_suffix = f"&{active_filter_query}" if active_filter_query else ""
+
 if filtered.empty:
     st.warning("Seçilen projelerde kayıt bulunamadı.")
     st.stop()
@@ -1121,7 +1180,10 @@ if detail_name:
     nav_home, nav_refresh, nav_clear, nav_space = st.columns([1.15, 1.0, 1.10, 5.75], gap="small")
     with nav_home:
         if st.button("🏠 HOME", type="primary", use_container_width=True, key="detail_home"):
-            st.query_params.clear()
+            # Keep f_* parameters for one rerun so the dashboard can restore its previous filters.
+            for _key in ["detail", "project", "discipline", "reset_filters"]:
+                if _key in st.query_params:
+                    del st.query_params[_key]
             st.rerun()
     with nav_refresh:
         if st.button("🔄 REFRESH", use_container_width=True, key="detail_refresh"):
@@ -1277,12 +1339,12 @@ if detail_name:
       function uniqueValues(col){return [...new Set(allRows.map(r=>String(r[col]??'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));}
       const valueCache={};function valuesFor(col){return valueCache[col]||(valueCache[col]=uniqueValues(col));}
       function parseDate(value){const text=String(value??'').trim();let match=text.match(/^(\d{2})[-/.](\d{2})[-/.](\d{4})$/);if(match)return Date.UTC(Number(match[3]),Number(match[2])-1,Number(match[1]));match=text.match(/^(\d{2})-([A-Z]{3})-(\d{4})$/i);if(match){const months={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};return Date.UTC(Number(match[3]),months[match[2].toUpperCase()],Number(match[1]));}match=text.match(/^(\d{4})-(\d{2})-(\d{2})/);if(match)return Date.UTC(Number(match[1]),Number(match[2])-1,Number(match[3]));return NaN;}
-      function applySort(rows){if(!sortState)return rows;const copy=[...rows],col=sortState.col,dir=sortState.dir;copy.sort((a,b)=>{const av=parseDate(a[col]),bv=parseDate(b[col]);if(Number.isNaN(av)&&Number.isNaN(bv))return 0;if(Number.isNaN(av))return 1;if(Number.isNaN(bv))return -1;return dir==='asc'?av-bv:bv-av;});return copy;}
+      function applySort(rows){if(!sortState)return rows;const copy=[...rows],col=sortState.col,dir=sortState.dir,isDate=columns[col]==='TRANSMITTAL DATE';copy.sort((a,b)=>{if(isDate){const av=parseDate(a[col]),bv=parseDate(b[col]);if(Number.isNaN(av)&&Number.isNaN(bv))return 0;if(Number.isNaN(av))return 1;if(Number.isNaN(bv))return -1;return dir==='asc'?av-bv:bv-av;}const av=String(a[col]??'').trim(),bv=String(b[col]??'').trim();if(!av&&!bv)return 0;if(!av)return 1;if(!bv)return -1;const result=av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'});return dir==='asc'?result:-result;});return copy;}
       function runFilter(){filteredRows=allRows.filter(row=>Object.entries(filters).every(([col,set])=>!set.size||set.has(String(row[Number(col)]??'').trim())));filteredRows=applySort(filteredRows);page=1;render();arrows.forEach(b=>b.classList.toggle('active',filters[b.dataset.col]?.size>0||sortState?.col===Number(b.dataset.col)));}
       function render(){const pages=Math.max(1,Math.ceil(filteredRows.length/pageSize));page=Math.min(page,pages);const start=(page-1)*pageSize,shown=filteredRows.slice(start,start+pageSize);tbody.innerHTML=shown.map(row=>'<tr>'+row.map(v=>`<td>${esc(v)}</td>`).join('')+'</tr>').join('');info.textContent=`${filteredRows.length.toLocaleString()} records | PAGE ${page} / ${pages}`;prev.disabled=page<=1;next.disabled=page>=pages;document.querySelector('.detail-table-scroll').scrollTop=0;}
       function renderOptions(){const q=search.value.trim().toLocaleLowerCase(),list=valuesFor(currentCol).filter(v=>v.toLocaleLowerCase().includes(q));options.innerHTML=list.length?'':'<div class="empty">No values found</div>';list.forEach(v=>{const label=document.createElement('label');label.className='option';const box=document.createElement('input');box.type='checkbox';box.value=v;box.checked=draft.has(v);box.onchange=()=>box.checked?draft.add(v):draft.delete(v);const span=document.createElement('span');span.textContent=v;label.append(box,span);options.appendChild(label);});}
-      function openPopup(button){currentCol=button.dataset.col;draft=new Set(filters[currentCol]||[]);search.value='';document.getElementById('popup-title').textContent=columns[currentCol];document.getElementById('sort-tools').style.display=columns[currentCol]==='TRANSMITTAL DATE'?'flex':'none';renderOptions();popup.classList.add('open');const r=button.getBoundingClientRect(),w=270;popup.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';popup.style.top=Math.min(r.bottom+4,window.innerHeight-365)+'px';search.focus();}
-      arrows.forEach(b=>b.onclick=e=>{e.stopPropagation();openPopup(b)});search.oninput=renderOptions;document.getElementById('select-visible').onclick=()=>{options.querySelectorAll('input').forEach(b=>{b.checked=true;draft.add(b.value)})};document.getElementById('clear').onclick=()=>{draft.clear();renderOptions()};document.getElementById('cancel').onclick=()=>popup.classList.remove('open');document.getElementById('apply').onclick=()=>{filters[currentCol]=new Set(draft);popup.classList.remove('open');runFilter()};document.getElementById('sort-newest').onclick=()=>{sortState={col:Number(currentCol),dir:'desc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-oldest').onclick=()=>{sortState={col:Number(currentCol),dir:'asc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-clear').onclick=()=>{sortState=null;popup.classList.remove('open');runFilter()};popup.onclick=e=>e.stopPropagation();document.onclick=()=>popup.classList.remove('open');prev.onclick=()=>{if(page>1){page--;render()}};next.onclick=()=>{if(page<Math.ceil(filteredRows.length/pageSize)){page++;render()}};render();
+      function openPopup(button){currentCol=button.dataset.col;draft=new Set(filters[currentCol]||[]);search.value='';const isDate=columns[currentCol]==='TRANSMITTAL DATE';document.getElementById('popup-title').textContent=columns[currentCol];document.getElementById('sort-tools').style.display='flex';document.getElementById('sort-newest').textContent=isDate?'NEWEST → OLDEST':'A → Z';document.getElementById('sort-oldest').textContent=isDate?'OLDEST → NEWEST':'Z → A';renderOptions();popup.classList.add('open');const r=button.getBoundingClientRect(),w=270;popup.style.left=Math.max(8,Math.min(r.left,window.innerWidth-w-8))+'px';popup.style.top=Math.min(r.bottom+4,window.innerHeight-365)+'px';search.focus();}
+      arrows.forEach(b=>b.onclick=e=>{e.stopPropagation();openPopup(b)});search.oninput=renderOptions;document.getElementById('select-visible').onclick=()=>{options.querySelectorAll('input').forEach(b=>{b.checked=true;draft.add(b.value)})};document.getElementById('clear').onclick=()=>{draft.clear();renderOptions()};document.getElementById('cancel').onclick=()=>popup.classList.remove('open');document.getElementById('apply').onclick=()=>{filters[currentCol]=new Set(draft);popup.classList.remove('open');runFilter()};document.getElementById('sort-newest').onclick=()=>{const isDate=columns[currentCol]==='TRANSMITTAL DATE';sortState={col:Number(currentCol),dir:isDate?'desc':'asc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-oldest').onclick=()=>{const isDate=columns[currentCol]==='TRANSMITTAL DATE';sortState={col:Number(currentCol),dir:isDate?'asc':'desc'};popup.classList.remove('open');runFilter()};document.getElementById('sort-clear').onclick=()=>{sortState=null;popup.classList.remove('open');runFilter()};popup.onclick=e=>e.stopPropagation();document.onclick=()=>popup.classList.remove('open');prev.onclick=()=>{if(page>1){page--;render()}};next.onclick=()=>{if(page<Math.ceil(filteredRows.length/pageSize)){page++;render()}};render();
     })();
     </script>
     '''.replace('__COLUMNS__', columns_json).replace('__ROWS__', rows_json).replace('__RESET__', json.dumps(reset_token))
@@ -1327,6 +1389,12 @@ counts = (
     + [not_ifc_count]
 )
 cols = st.columns(8, gap="small")
+code_definitions = {
+    "Code 1": "(No comments)",
+    "Code 2": "(With comment)",
+    "Code 3": "(Rejected)",
+    "Code 4": "(For information)",
+}
 for col, name, value in zip(cols, card_names, counts):
     color = COLORS.get(name, "#06499D")
     is_total = name == "TOTAL DOCUMENTS"
@@ -1336,11 +1404,12 @@ for col, name, value in zip(cols, card_names, counts):
     label_color = "#ffffff" if is_total else ("#B82032" if is_not_ifc else "#16345f")
     # Use Streamlit's current app URL and a JavaScript navigation target.
     # This is more reliable on Streamlit Cloud / proxied deployments than a bare relative href.
-    detail_url = f"?detail={quote(name)}"
+    detail_url = f"?detail={quote(name)}{active_filter_suffix}"
     col.markdown(
         f'<a class="kpi-link" href="{detail_url}" target="_self">'
         f'<div class="kpi" style="background:{bg};border-top-color:{color}">'
         f'<div class="label" style="color:{label_color}">{name}</div>'
+        f'<div class="kpi-definition" style="color:{color}">{code_definitions.get(name, "")}</div>'
         f'<div class="value" style="color:{fg}">{fmt(value)}</div></div></a>',
         unsafe_allow_html=True
     )
@@ -1359,11 +1428,11 @@ project_tables = {
 }
 for project_name, project_table in project_tables.items():
     if not project_table.empty:
-        if sort_choice == "Progress büyükten küçüğe":
+        if sort_choice == "Progress High to Low":
             project_tables[project_name] = project_table.sort_values(
                 "PROGRESS", ascending=False, na_position="last", kind="stable"
             ).reset_index(drop=True)
-        elif sort_choice == "Progress küçükten büyüğe":
+        elif sort_choice == "Progress Low to High":
             project_tables[project_name] = project_table.sort_values(
                 "PROGRESS", ascending=True, na_position="last", kind="stable"
             ).reset_index(drop=True)
@@ -1673,22 +1742,22 @@ for col, project in [(middle,"EPC-1"),(right,"EPC-2")]:
                 discipline_name = str(row["DISCIPLINE"])
                 discipline_q = quote(discipline_name)
                 project_q = quote(project)
-                discipline_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}"
+                discipline_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}{active_filter_suffix}"
                 html_parts.append(f'<td><a class="cell-link" href="{discipline_url}" target="_self">{html.escape(discipline_name)}</a></td>')
                 for status_name in STATUS:
                     value = int(row[status_name])
                     cell_class = ' class="code2-col"' if status_name == "Code 2" else (' class="code3-col"' if status_name == "Code 3" else "")
                     if value:
-                        cell_url = f"?detail={quote(status_name)}&project={project_q}&discipline={discipline_q}"
+                        cell_url = f"?detail={quote(status_name)}&project={project_q}&discipline={discipline_q}{active_filter_suffix}"
                         cell_value = f'<a class="cell-link" href="{cell_url}" target="_self">{fmt(value)}</a>'
                     else:
                         cell_value = ""
                     html_parts.append(f'<td{cell_class}>{cell_value}</td>')
                 not_ifc_value = int(row["NOT IFC"])
-                not_ifc_url = f"?detail={quote('NOT IFC')}&project={project_q}&discipline={discipline_q}"
+                not_ifc_url = f"?detail={quote('NOT IFC')}&project={project_q}&discipline={discipline_q}{active_filter_suffix}"
                 not_ifc_html = f'<a class="cell-link" href="{not_ifc_url}" target="_self">{fmt(not_ifc_value)}</a>' if not_ifc_value else ""
                 html_parts.append(f'<td class="not-ifc-col">{not_ifc_html}</td>')
-                total_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}"
+                total_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={project_q}&discipline={discipline_q}{active_filter_suffix}"
                 html_parts.append(f'<td><b><a class="cell-link" href="{total_url}" target="_self">{fmt(int(row["TOTAL"]))}</a></b></td>')
                 progress_value = row["PROGRESS"]
                 if pd.isna(progress_value):
@@ -1731,11 +1800,11 @@ for col, project in [(middle,"EPC-1"),(right,"EPC-2")]:
             html_parts.append('<td>TOTAL</td>')
             for status_name in STATUS:
                 cell_class = ' class="code2-col"' if status_name == "Code 2" else (' class="code3-col"' if status_name == "Code 3" else "")
-                total_status_url = f"?detail={quote(status_name)}&project={quote(project)}"
+                total_status_url = f"?detail={quote(status_name)}&project={quote(project)}{active_filter_suffix}"
                 html_parts.append(f'<td{cell_class}><a class="cell-link" href="{total_status_url}" target="_self">{fmt(total_values[status_name])}</a></td>')
-            total_not_ifc_url = f"?detail={quote('NOT IFC')}&project={quote(project)}"
+            total_not_ifc_url = f"?detail={quote('NOT IFC')}&project={quote(project)}{active_filter_suffix}"
             html_parts.append(f'<td class="not-ifc-col"><a class="cell-link" href="{total_not_ifc_url}" target="_self">{fmt(total_values["NOT IFC"])}</a></td>')
-            total_docs_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={quote(project)}"
+            total_docs_url = f"?detail={quote('TOTAL DOCUMENTS')}&project={quote(project)}{active_filter_suffix}"
             html_parts.append(f'<td><a class="cell-link" href="{total_docs_url}" target="_self">{fmt(total_values["TOTAL"])}</a></td>')
             total_progress = total_values["PROGRESS"]
             if pd.isna(total_progress):
@@ -1785,25 +1854,7 @@ document.addEventListener('click', function(event) {
 
 
 
-st.markdown(
-    '<div class="legend">'
-    '<div class="legend-title">CODE<br>DEFINITIONS</div>'
-    '<div class="legend-item">'
-    '<span class="legend-icon" style="color:#159b84"><svg viewBox="0 0 48 56" aria-hidden="true"><path d="M8 3h21l11 11v39H8z"/><path d="M29 3v12h11M15 25h18M15 34h18M15 43h13"/></svg></span>'
-    '<span class="legend-copy"><b style="color:#087e70">Code 1</b><small>No comments</small></span></div>'
-    '<div class="legend-item">'
-    '<span class="legend-icon" style="color:#f07812"><svg viewBox="0 0 48 56" aria-hidden="true"><path d="M8 3h21l11 11v39H8z"/><path d="M29 3v12h11M15 25h18M15 34h18M15 43h13"/></svg></span>'
-    '<span class="legend-copy"><b style="color:#e66b00">Code 2</b><small>With comment</small></span></div>'
-    '<div class="legend-item">'
-    '<span class="legend-icon" style="color:#e32636"><svg viewBox="0 0 48 56" aria-hidden="true"><path d="M8 3h21l11 11v39H8z"/><path d="M29 3v12h11M15 25h18M15 34h18M15 43h13"/></svg></span>'
-    '<span class="legend-copy"><b style="color:#d7192d">Code 3</b><small>Rejected</small></span></div>'
-    '<div class="legend-item">'
-    '<span class="legend-icon" style="color:#1268d8"><svg viewBox="0 0 48 56" aria-hidden="true"><path d="M8 3h21l11 11v39H8z"/><path d="M29 3v12h11M15 25h18M15 34h18M15 43h13"/></svg></span>'
-    '<span class="legend-copy"><b style="color:#084da7">Code 4</b><small>For information</small></span></div>'
-    '</div>',
-    unsafe_allow_html=True
-)
-st.write("")
+
 st.markdown(
     '<div class="small-note">Source: Original workbook / DETAIL_REPORT · '
     'Count key: unique DRAWING NUMBER · Grouping: DISCIPLINE and STATUS · '
